@@ -10,6 +10,8 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import ScentTechConfigEntry
 from .const import (
+    DISPENSE_DURATION_MAX,
+    DISPENSE_DURATION_MIN,
     DOMAIN,
     MANUFACTURER,
     MODEL,
@@ -28,7 +30,11 @@ async def async_setup_entry(
 ) -> None:
     """Set up diffuser setting entities."""
     async_add_entities(
-        [ScentTechSprayDurationNumber(entry), ScentTechPauseTimeNumber(entry)]
+        [
+            ScentTechSprayDurationNumber(entry),
+            ScentTechPauseTimeNumber(entry),
+            ScentTechDispenseDurationNumber(entry),
+        ]
     )
 
 
@@ -81,7 +87,10 @@ class ScentTechSprayDurationNumber(ScentTechNumberBase):
         return self._client.spray_duration
 
     async def async_set_native_value(self, value: float) -> None:
-        await self._client.async_set_settings(spray_duration=int(value))
+        # A value set by hand defines the Custom preset.
+        await self._client.async_set_settings(
+            spray_duration=int(value), remember_custom=True
+        )
 
 
 class ScentTechPauseTimeNumber(ScentTechNumberBase):
@@ -103,4 +112,30 @@ class ScentTechPauseTimeNumber(ScentTechNumberBase):
         return self._client.pause_time
 
     async def async_set_native_value(self, value: float) -> None:
-        await self._client.async_set_settings(pause_time=int(value))
+        # A value set by hand defines the Custom preset.
+        await self._client.async_set_settings(
+            pause_time=int(value), remember_custom=True
+        )
+
+
+class ScentTechDispenseDurationNumber(ScentTechNumberBase):
+    """How long the Dispense now button sprays for."""
+
+    _attr_name = "Dispense duration"
+    _attr_icon = "mdi:spray-bottle"
+    _attr_native_min_value = DISPENSE_DURATION_MIN
+    _attr_native_max_value = DISPENSE_DURATION_MAX
+    _attr_native_step = 1
+    _attr_native_unit_of_measurement = "s"
+
+    def __init__(self, entry: ScentTechConfigEntry) -> None:
+        super().__init__(entry)
+        self._attr_unique_id = f"{self._client.address}_dispense_duration"
+
+    @property
+    def native_value(self) -> float:
+        return self._client.dispense_duration
+
+    async def async_set_native_value(self, value: float) -> None:
+        """Store locally; this setting never touches the diffuser."""
+        await self._client.async_set_dispense_duration(int(value))
