@@ -36,6 +36,10 @@ COMMAND_OFF: Final = bytes.fromhex("55aa0407120000e45a")
 COMMAND_WAKE: Final = bytes.fromhex("55aa0147b95a")
 # Read every stored timer record. The device answers with 0x88.
 COMMAND_QUERY_SCHEDULES: Final = bytes.fromhex("55aa0108f85a")
+# Command 0x16 fires one immediate burst and leaves the power register alone,
+# unlike an ON/sleep/OFF pair which switches the diffuser off afterwards and
+# silently stops the stored schedule from running.
+COMMAND_DISPENSE: Final = bytes.fromhex("55aa0116ea5a")
 
 SCHEDULE_RESPONSE: Final = 0x88
 SCHEDULE_RECORD_SIZE: Final = 16
