@@ -18,6 +18,10 @@ CONF_ADDRESS: Final = "address"
 CONF_NAME: Final = "name"
 CONF_SEND_WAKE: Final = "send_wake_packet"
 CONF_POLL_INTERVAL: Final = "poll_interval"
+# The Custom preset is remembered across restarts in the config entry options,
+# because in-memory defaults would otherwise coincide with a built-in preset.
+CONF_CUSTOM_SPRAY: Final = "custom_spray_duration"
+CONF_CUSTOM_PAUSE: Final = "custom_pause_time"
 
 DEFAULT_NAME: Final = "Scent Diffuser"
 DEFAULT_SEND_WAKE: Final = False
