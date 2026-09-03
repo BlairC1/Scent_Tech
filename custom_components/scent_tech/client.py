@@ -132,6 +132,8 @@ class ScentTechClient:
         name: str,
         *,
         send_wake_packet: bool,
+        custom_spray_duration: int = CUSTOM_SPRAY_DEFAULT,
+        custom_pause_time: int = CUSTOM_PAUSE_DEFAULT,
     ) -> None:
         """Initialize the BLE client."""
         self._hass = hass
