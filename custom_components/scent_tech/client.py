@@ -19,6 +19,7 @@ from homeassistant.exceptions import HomeAssistantError
 
 from .const import (
     CHARACTERISTIC_UUID,
+    COMMAND_DISPENSE,
     COMMAND_LED_CYCLE,
     COMMAND_QUERY_SCHEDULES,
     COMMAND_OFF,
@@ -35,7 +36,6 @@ from .const import (
     HA_SCHEDULE_START_MINUTE,
     HA_SCHEDULE_TIMER_ID,
     HA_SCHEDULE_WEEKDAYS,
-    MANUAL_DISPENSE_SECONDS,
     PAUSE_TIME_DEFAULT,
     PAUSE_TIME_MAX,
     PAUSE_TIME_MIN,
@@ -444,26 +444,46 @@ class ScentTechClient:
         return written
 
     async def async_set_schedule(self, enabled: bool) -> bool:
-        """Enable or disable the stored repeating spray/pause cycle."""
+        """Enable or disable the stored repeating spray/pause cycle.
+
+        The schedule record and the power register are separate: a diffuser
+        whose power register is off will not run an enabled schedule. Both are
+        written so the switch means what it says.
+        """
         payload = self.build_settings_packet(
             self.spray_duration, self.pause_time, enabled
         )
         written = await self.async_send(payload)
         if written:
             self.schedule_enabled = enabled
+            await asyncio.sleep(0.25)
+            await self.async_send(
+                COMMAND_ON if enabled else COMMAND_OFF, allow_duplicate=True
+            )
             self._notify_listeners()
         return written
 
+    async def async_ensure_powered(self) -> None:
+        """Switch the power register on when a schedule is meant to be running.
+
+        Called after the setup poll so a restart cannot leave an enabled
+        schedule sitting on a powered-off diffuser.
+        """
+        if not self.schedule_enabled:
+            return
+        if self.powered:
+            return
+        await self.async_send(COMMAND_ON, allow_duplicate=True)
+
     async def async_dispense_now(self) -> None:
-        """Run one short manual fragrance burst without changing the schedule."""
+        """Run one manual burst without disturbing power or the schedule.
+
+        Command 0x16 is a dedicated one-shot burst. The previous ON/sleep/OFF
+        approach left the power register off, which silently stopped the stored
+        schedule from ever running again.
+        """
         async with self._dispense_lock:
-            await self.async_send(COMMAND_ON)
-            try:
-                await asyncio.sleep(MANUAL_DISPENSE_SECONDS)
-            finally:
-                # Always request stop after a successful start, including if Home
-                # Assistant cancels the button action during the delay.
-                await asyncio.shield(self.async_send(COMMAND_OFF))
+            await self.async_send(COMMAND_DISPENSE, allow_duplicate=True)
 
     async def async_set_preset(self, preset: str) -> bool:
         """Apply one of the predefined fragrance presets in one BLE write."""
