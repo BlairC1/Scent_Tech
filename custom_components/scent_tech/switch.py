@@ -52,8 +52,8 @@ class ScentTechAutomaticDiffusionSwitch(SwitchEntity):
 
     @property
     def available(self) -> bool:
-        """Allow an action to establish or restore the BLE connection."""
-        return True
+        """Report unavailable only after repeated polls have failed."""
+        return self._client.available
 
     @property
     def is_on(self) -> bool:
