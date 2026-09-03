@@ -17,9 +17,16 @@ PLATFORMS: Final = [
 CONF_ADDRESS: Final = "address"
 CONF_NAME: Final = "name"
 CONF_SEND_WAKE: Final = "send_wake_packet"
+CONF_POLL_INTERVAL: Final = "poll_interval"
 
 DEFAULT_NAME: Final = "Scent Diffuser"
 DEFAULT_SEND_WAKE: Final = False
+DEFAULT_POLL_INTERVAL: Final = 300
+MIN_POLL_INTERVAL: Final = 60
+MAX_POLL_INTERVAL: Final = 3600
+# Tolerate one missed poll before entities go unavailable: a single dropped BLE
+# connection is far more common than the diffuser actually going away.
+POLL_FAILURE_TOLERANCE: Final = 2
 
 SERVICE_UUID: Final = "0000ffe0-0000-1000-8000-00805f9b34fb"
 CHARACTERISTIC_UUID: Final = "0000ffe1-0000-1000-8000-00805f9b34fb"
@@ -27,6 +34,21 @@ CHARACTERISTIC_UUID: Final = "0000ffe1-0000-1000-8000-00805f9b34fb"
 COMMAND_ON: Final = bytes.fromhex("55aa0407120100e35a")
 COMMAND_OFF: Final = bytes.fromhex("55aa0407120000e45a")
 COMMAND_WAKE: Final = bytes.fromhex("55aa0147b95a")
+# Read every stored timer record. The device answers with 0x88.
+COMMAND_QUERY_SCHEDULES: Final = bytes.fromhex("55aa0108f85a")
+
+SCHEDULE_RESPONSE: Final = 0x88
+SCHEDULE_RECORD_SIZE: Final = 16
+SCHEDULE_QUERY_TIMEOUT: Final = 5.0
+
+# Home Assistant owns record 1 and keeps it covering every day, all day, so the
+# diffuser always matches it and never falls through to a record the phone app
+# wrote. Spray and pause are then the only things that vary.
+HA_SCHEDULE_SLOT: Final = 1
+HA_SCHEDULE_WEEKDAYS: Final = 0x00FF
+HA_SCHEDULE_START_MINUTE: Final = 0
+HA_SCHEDULE_END_MINUTE: Final = 1439
+HA_SCHEDULE_TIMER_ID: Final = 1
 
 # Command 0x07 register 0x15 with any non-zero value steps the indicator LED one
 # place through a fixed four-colour cycle. A zero value is a no-op, and there is
