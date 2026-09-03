@@ -83,9 +83,15 @@ LED_DEFAULT_COLOUR: Final = "white"
 LED_STEP_TIMEOUT: Final = 2.0
 
 MANUAL_DISPENSE_SECONDS: Final = 3
+# Manual burst length for the Dispense now button. At the default the dedicated
+# one-shot command 0x16 is used, which has no side effects. Any other value is
+# produced by holding the power register on for that long instead.
+DISPENSE_DURATION_MIN: Final = 1
+DISPENSE_DURATION_MAX: Final = 60
+DISPENSE_DURATION_DEFAULT: Final = MANUAL_DISPENSE_SECONDS
 
 SPRAY_DURATION_MIN: Final = 3
-SPRAY_DURATION_MAX: Final = 8
+SPRAY_DURATION_MAX: Final = 60
 SPRAY_DURATION_DEFAULT: Final = 5
 PAUSE_TIME_MIN: Final = 90
 PAUSE_TIME_MAX: Final = 600
@@ -103,6 +109,11 @@ PRESET_OPTIONS: Final = [
     PRESET_INTENSE,
     PRESET_CUSTOM,
 ]
+# Custom is a remembered user preset rather than a placeholder: whatever spray
+# and pause the user last set by hand is restored when Custom is selected.
+CUSTOM_SPRAY_DEFAULT: Final = SPRAY_DURATION_DEFAULT
+CUSTOM_PAUSE_DEFAULT: Final = PAUSE_TIME_DEFAULT
+
 PRESET_VALUES: Final = {
     PRESET_LIGHT: (3, 600),
     PRESET_BALANCED: (5, 300),
