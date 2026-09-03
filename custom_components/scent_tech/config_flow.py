@@ -13,10 +13,14 @@ from homeassistant.data_entry_flow import FlowResult
 from .const import (
     CONF_ADDRESS,
     CONF_NAME,
+    CONF_POLL_INTERVAL,
     CONF_SEND_WAKE,
     DEFAULT_NAME,
+    DEFAULT_POLL_INTERVAL,
     DEFAULT_SEND_WAKE,
     DOMAIN,
+    MAX_POLL_INTERVAL,
+    MIN_POLL_INTERVAL,
 )
 
 
@@ -113,7 +117,16 @@ class ScentTechOptionsFlow(config_entries.OptionsFlow):
                         default=self._config_entry.options.get(
                             CONF_SEND_WAKE, DEFAULT_SEND_WAKE
                         ),
-                    ): bool
+                    ): bool,
+                    vol.Optional(
+                        CONF_POLL_INTERVAL,
+                        default=self._config_entry.options.get(
+                            CONF_POLL_INTERVAL, DEFAULT_POLL_INTERVAL
+                        ),
+                    ): vol.All(
+                        vol.Coerce(int),
+                        vol.Range(min=MIN_POLL_INTERVAL, max=MAX_POLL_INTERVAL),
+                    ),
                 }
             ),
         )
