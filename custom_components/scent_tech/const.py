@@ -89,6 +89,9 @@ MANUAL_DISPENSE_SECONDS: Final = 3
 DISPENSE_DURATION_MIN: Final = 1
 DISPENSE_DURATION_MAX: Final = 60
 DISPENSE_DURATION_DEFAULT: Final = MANUAL_DISPENSE_SECONDS
+# How long to wait for the diffuser to confirm a one-shot burst before assuming
+# it was ignored and falling back to holding the power register on.
+DISPENSE_CONFIRM_TIMEOUT: Final = 2.0
 
 SPRAY_DURATION_MIN: Final = 3
 SPRAY_DURATION_MAX: Final = 60
