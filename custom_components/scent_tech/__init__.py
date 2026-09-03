@@ -43,6 +43,7 @@ async def async_setup_entry(
     try:
         await client.async_connect()
         await client.async_refresh()
+        await client.async_ensure_powered()
     except Exception:  # noqa: BLE001 - setup must survive any connection problem
         _LOGGER.debug(
             "Could not read %s during setup; will retry on the next poll",
