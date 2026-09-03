@@ -13,7 +13,6 @@ from .const import (
     LED_COLOUR_OPTIONS,
     MANUFACTURER,
     MODEL,
-    PRESET_CUSTOM,
     PRESET_OPTIONS,
 )
 
@@ -59,9 +58,20 @@ class ScentTechPresetSelect(SelectEntity):
     def current_option(self) -> str:
         return self._client.preset
 
+    @property
+    def extra_state_attributes(self) -> dict[str, int]:
+        """Expose the remembered Custom pair so it can be checked in the UI."""
+        return {
+            "custom_spray_duration": self._client.custom_spray_duration,
+            "custom_pause_time": self._client.custom_pause_time,
+        }
+
     async def async_select_option(self, option: str) -> None:
-        if option == PRESET_CUSTOM:
-            return
+        """Apply the chosen preset.
+
+        Custom is selectable rather than a read-only label: it restores the
+        spray duration and pause the user last set by hand.
+        """
         await self._client.async_set_preset(option)
 
 
