@@ -20,6 +20,7 @@ from homeassistant.exceptions import HomeAssistantError
 from .const import (
     CHARACTERISTIC_UUID,
     COMMAND_LED_CYCLE,
+    COMMAND_QUERY_SCHEDULES,
     COMMAND_OFF,
     COMMAND_ON,
     COMMAND_DEDUPLICATION_SECONDS,
@@ -29,6 +30,11 @@ from .const import (
     LED_OFF_RGB,
     LED_PALETTE,
     LED_STEP_TIMEOUT,
+    HA_SCHEDULE_END_MINUTE,
+    HA_SCHEDULE_SLOT,
+    HA_SCHEDULE_START_MINUTE,
+    HA_SCHEDULE_TIMER_ID,
+    HA_SCHEDULE_WEEKDAYS,
     MANUAL_DISPENSE_SECONDS,
     PAUSE_TIME_DEFAULT,
     PAUSE_TIME_MAX,
@@ -38,7 +44,11 @@ from .const import (
     SPRAY_DURATION_DEFAULT,
     SPRAY_DURATION_MAX,
     SPRAY_DURATION_MIN,
+    POLL_FAILURE_TOLERANCE,
     SCHEDULE_ENABLED_DEFAULT,
+    SCHEDULE_QUERY_TIMEOUT,
+    SCHEDULE_RECORD_SIZE,
+    SCHEDULE_RESPONSE,
     STATUS_BGR_OFFSET,
     STATUS_COMMAND,
     STATUS_FLAG_POWERED,
@@ -67,6 +77,47 @@ class ScentTechDiagnostics:
     last_notification: str | None = None
     last_status: str | None = None
     last_error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ScheduleRecord:
+    """One 16-byte timer record as stored on the diffuser."""
+
+    enabled: bool
+    serial: int
+    weekdays: int
+    start_minute: int
+    end_minute: int
+    spray_duration: int
+    pause_time: int
+    timer_id: int
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> ScheduleRecord:
+        """Decode one record."""
+        return cls(
+            enabled=bool(data[0]),
+            serial=data[1],
+            weekdays=int.from_bytes(data[2:4], "little"),
+            start_minute=int.from_bytes(data[4:6], "little"),
+            end_minute=int.from_bytes(data[6:8], "little"),
+            spray_duration=int.from_bytes(data[8:10], "little"),
+            pause_time=int.from_bytes(data[10:12], "little"),
+            timer_id=int.from_bytes(data[12:16], "little"),
+        )
+
+    @property
+    def is_all_day(self) -> bool:
+        """Return whether this record covers every day, around the clock.
+
+        A record shaped this way always matches, so the diffuser never falls
+        through to a later one. Home Assistant keeps record 1 in this shape.
+        """
+        return (
+            self.weekdays & 0x7F == 0x7F
+            and self.start_minute <= HA_SCHEDULE_START_MINUTE
+            and self.end_minute >= HA_SCHEDULE_END_MINUTE
+        )
 
 
 class ScentTechClient:
@@ -102,6 +153,11 @@ class ScentTechClient:
         self.last_lit_colour = LED_DEFAULT_COLOUR
         self._led_lock = asyncio.Lock()
         self._status_event = asyncio.Event()
+        self._schedule_event = asyncio.Event()
+        self.records: dict[int, ScheduleRecord] = {}
+        self.ha_owns_schedule: bool | None = None
+        self.last_poll_ok: bool | None = None
+        self._poll_failures = 0
         self._rx = bytearray()
         self._listeners: set[Callable[[], None]] = set()
 
@@ -167,6 +223,8 @@ class ScentTechClient:
         for frame in self._extract_frames():
             if frame[3] == STATUS_COMMAND:
                 self._apply_status(frame)
+            elif frame[3] == SCHEDULE_RESPONSE:
+                self._apply_schedules(frame)
 
     def _extract_frames(self) -> list[bytes]:
         """Pull every complete, checksum-valid frame out of the receive buffer."""
@@ -215,6 +273,51 @@ class ScentTechClient:
 
         self.diagnostics.last_status = frame.hex()
         self._status_event.set()
+        self._notify_listeners()
+
+    def _apply_schedules(self, frame: bytes) -> None:
+        """Decode a 0x88 reply and adopt the diffuser's own settings.
+
+        The device reports only the records it actually holds, preceded by a
+        two-byte count, rather than a fixed five.
+        """
+        payload = frame[4:-2]
+        if len(payload) < 2:
+            _LOGGER.debug("Short schedule reply: %s", frame.hex())
+            return
+
+        records: dict[int, ScheduleRecord] = {}
+        body = payload[2:]
+        for offset in range(0, len(body) - SCHEDULE_RECORD_SIZE + 1, SCHEDULE_RECORD_SIZE):
+            record = ScheduleRecord.from_bytes(body[offset : offset + SCHEDULE_RECORD_SIZE])
+            records[record.serial] = record
+        self.records = records
+
+        owned = records.get(HA_SCHEDULE_SLOT)
+        self.ha_owns_schedule = owned is not None and owned.is_all_day
+        if owned is not None and self.ha_owns_schedule:
+            self.spray_duration = owned.spray_duration
+            self.pause_time = owned.pause_time
+            self.schedule_enabled = owned.enabled
+        elif owned is not None:
+            # The phone app has narrowed record 1, so the diffuser can fall
+            # through to another record and run when Home Assistant thinks it
+            # is idle. Report what the record says and flag the mismatch.
+            self.spray_duration = owned.spray_duration
+            self.pause_time = owned.pause_time
+            self.schedule_enabled = owned.enabled
+            _LOGGER.warning(
+                "Record 1 on %s is windowed %02d:%02d-%02d:%02d rather than all "
+                "day, so other stored schedules can still run. Change any "
+                "setting in Home Assistant to take it back.",
+                self.address,
+                owned.start_minute // 60,
+                owned.start_minute % 60,
+                owned.end_minute // 60,
+                owned.end_minute % 60,
+            )
+
+        self._schedule_event.set()
         self._notify_listeners()
 
     async def _async_connect(self) -> BleakClient:
@@ -282,13 +385,21 @@ class ScentTechClient:
     def build_settings_packet(
         self, spray_duration: int, pause_time: int, schedule_enabled: bool
     ) -> bytes:
-        """Build command 0x14 containing schedule state and cycle settings."""
+        """Build command 0x14 for the Home Assistant-owned schedule record.
+
+        The window is deliberately fixed at every day, 00:00-23:59. A record
+        that always matches is one the diffuser never falls through, so any
+        schedule the phone app left behind cannot fire behind our back. Spray
+        duration and pause time are what Home Assistant actually varies.
+        """
         data = (
-            bytes((1 if schedule_enabled else 0,))
-            + bytes.fromhex("01ff00e0016405")
+            bytes((1 if schedule_enabled else 0, HA_SCHEDULE_SLOT))
+            + HA_SCHEDULE_WEEKDAYS.to_bytes(2, "little")
+            + HA_SCHEDULE_START_MINUTE.to_bytes(2, "little")
+            + HA_SCHEDULE_END_MINUTE.to_bytes(2, "little")
             + spray_duration.to_bytes(2, "little")
             + pause_time.to_bytes(2, "little")
-            + bytes.fromhex("01000000")
+            + HA_SCHEDULE_TIMER_ID.to_bytes(4, "little")
         )
         return self._build_packet(0x14, data)
 
@@ -363,6 +474,47 @@ class ScentTechClient:
         return await self.async_set_settings(
             spray_duration=duration, pause_time=pause
         )
+
+    @property
+    def available(self) -> bool:
+        """Return whether recent polling supports showing a state.
+
+        One missed poll is tolerated; a dropped BLE connection is far more
+        common than the diffuser genuinely going away.
+        """
+        if self.last_poll_ok is None:
+            return True
+        return self._poll_failures < POLL_FAILURE_TOLERANCE
+
+    async def async_connect(self) -> None:
+        """Open the persistent session, for use during setup."""
+        async with self._lock:
+            await self._async_connect()
+
+    async def async_refresh(self) -> bool:
+        """Read the stored schedules and adopt them as Home Assistant state.
+
+        Returns False when the diffuser could not be reached. State is only
+        replaced on success, so a missed poll leaves the last known values in
+        place rather than reverting entities to defaults.
+        """
+        self._schedule_event.clear()
+        try:
+            await self.async_send(COMMAND_QUERY_SCHEDULES, allow_duplicate=True)
+            await asyncio.wait_for(
+                self._schedule_event.wait(), SCHEDULE_QUERY_TIMEOUT
+            )
+        except (HomeAssistantError, TimeoutError) as err:
+            self._poll_failures += 1
+            self.last_poll_ok = False
+            self.diagnostics.last_error = f"Schedule poll failed: {err}"
+            _LOGGER.debug("Schedule poll failed for %s: %s", self.address, err)
+            self._notify_listeners()
+            return False
+
+        self._poll_failures = 0
+        self.last_poll_ok = True
+        return True
 
     async def async_cycle_led(self) -> None:
         """Advance the indicator LED one place through the firmware palette."""
