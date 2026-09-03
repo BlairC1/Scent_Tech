@@ -36,10 +36,6 @@ COMMAND_OFF: Final = bytes.fromhex("55aa0407120000e45a")
 COMMAND_WAKE: Final = bytes.fromhex("55aa0147b95a")
 # Read every stored timer record. The device answers with 0x88.
 COMMAND_QUERY_SCHEDULES: Final = bytes.fromhex("55aa0108f85a")
-# Command 0x16 fires one immediate burst and leaves the power register alone,
-# unlike an ON/sleep/OFF pair which switches the diffuser off afterwards and
-# silently stops the stored schedule from running.
-COMMAND_DISPENSE: Final = bytes.fromhex("55aa0116ea5a")
 
 SCHEDULE_RESPONSE: Final = 0x88
 SCHEDULE_RECORD_SIZE: Final = 16
@@ -83,16 +79,6 @@ LED_DEFAULT_COLOUR: Final = "white"
 LED_STEP_TIMEOUT: Final = 2.0
 
 MANUAL_DISPENSE_SECONDS: Final = 3
-# Manual burst length for the Dispense now button. At the default the dedicated
-# one-shot command 0x16 is used, which has no side effects. Any other value is
-# produced by holding the power register on for that long instead.
-DISPENSE_DURATION_MIN: Final = 1
-DISPENSE_DURATION_MAX: Final = 60
-DISPENSE_DURATION_DEFAULT: Final = MANUAL_DISPENSE_SECONDS
-# How long to wait for the diffuser to confirm a one-shot burst before assuming
-# it was ignored and falling back to holding the power register on.
-DISPENSE_CONFIRM_TIMEOUT: Final = 2.0
-
 SPRAY_DURATION_MIN: Final = 3
 SPRAY_DURATION_MAX: Final = 60
 SPRAY_DURATION_DEFAULT: Final = 5
