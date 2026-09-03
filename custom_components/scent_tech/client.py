@@ -19,7 +19,6 @@ from homeassistant.exceptions import HomeAssistantError
 
 from .const import (
     CHARACTERISTIC_UUID,
-    COMMAND_DISPENSE,
     COMMAND_LED_CYCLE,
     COMMAND_QUERY_SCHEDULES,
     COMMAND_OFF,
@@ -45,10 +44,6 @@ from .const import (
     SPRAY_DURATION_MAX,
     CUSTOM_PAUSE_DEFAULT,
     CUSTOM_SPRAY_DEFAULT,
-    DISPENSE_CONFIRM_TIMEOUT,
-    DISPENSE_DURATION_DEFAULT,
-    DISPENSE_DURATION_MAX,
-    DISPENSE_DURATION_MIN,
     MANUAL_DISPENSE_SECONDS,
     SPRAY_DURATION_MIN,
     POLL_FAILURE_TOLERANCE,
@@ -155,7 +150,6 @@ class ScentTechClient:
         self.schedule_enabled = SCHEDULE_ENABLED_DEFAULT
         self.custom_spray_duration = CUSTOM_SPRAY_DEFAULT
         self.custom_pause_time = CUSTOM_PAUSE_DEFAULT
-        self.dispense_duration = DISPENSE_DURATION_DEFAULT
         self.led_rgb: tuple[int, int, int] | None = None
         self.powered: bool | None = None
         self.spraying: bool | None = None
@@ -501,44 +495,15 @@ class ScentTechClient:
         await self.async_send(COMMAND_ON, allow_duplicate=True)
 
     async def async_dispense_now(self) -> None:
-        """Run one manual burst, whatever the diffuser's power state.
-
-        Command 0x16 is a dedicated one-shot that leaves the power register
-        alone, but the firmware ignores it while the diffuser is powered off.
-        In that case, and for any non-default duration, the power register is
-        held on for the requested time and then returned to how it was.
-        """
+        """Run one short manual fragrance burst without changing the schedule."""
         async with self._dispense_lock:
-            if (
-                self.powered is not False
-                and self.dispense_duration == MANUAL_DISPENSE_SECONDS
-            ):
-                self._status_event.clear()
-                await self.async_send(COMMAND_DISPENSE, allow_duplicate=True)
-                try:
-                    await asyncio.wait_for(
-                        self._status_event.wait(), DISPENSE_CONFIRM_TIMEOUT
-                    )
-                except TimeoutError:
-                    _LOGGER.debug(
-                        "No status push after a one-shot dispense on %s; "
-                        "falling back to a timed burst",
-                        self.address,
-                    )
-                else:
-                    return
-
-            # Timed burst: hold the power register on, then put it back. The
-            # schedule depends on the same register, so it must be restored.
-            was_powered = bool(self.powered) or self.schedule_enabled
-            await self.async_send(COMMAND_ON, allow_duplicate=True)
+            await self.async_send(COMMAND_ON)
             try:
-                await asyncio.sleep(self.dispense_duration)
+                await asyncio.sleep(MANUAL_DISPENSE_SECONDS)
             finally:
-                if not was_powered:
-                    await asyncio.shield(
-                        self.async_send(COMMAND_OFF, allow_duplicate=True)
-                    )
+                # Always request stop after a successful start, including if Home
+                # Assistant cancels the button action during the delay.
+                await asyncio.shield(self.async_send(COMMAND_OFF))
 
     async def async_set_preset(self, preset: str) -> bool:
         """Apply a fragrance preset in one BLE write.
@@ -556,16 +521,6 @@ class ScentTechClient:
         return await self.async_set_settings(
             spray_duration=duration, pause_time=pause
         )
-
-    async def async_set_dispense_duration(self, seconds: int) -> None:
-        """Set how long the Dispense now button sprays for."""
-        if not DISPENSE_DURATION_MIN <= seconds <= DISPENSE_DURATION_MAX:
-            raise HomeAssistantError(
-                f"Dispense duration must be between {DISPENSE_DURATION_MIN} "
-                f"and {DISPENSE_DURATION_MAX} seconds"
-            )
-        self.dispense_duration = seconds
-        self._notify_listeners()
 
     @property
     def available(self) -> bool:
