@@ -43,6 +43,12 @@ from .const import (
     PRESET_VALUES,
     SPRAY_DURATION_DEFAULT,
     SPRAY_DURATION_MAX,
+    CUSTOM_PAUSE_DEFAULT,
+    CUSTOM_SPRAY_DEFAULT,
+    DISPENSE_DURATION_DEFAULT,
+    DISPENSE_DURATION_MAX,
+    DISPENSE_DURATION_MIN,
+    MANUAL_DISPENSE_SECONDS,
     SPRAY_DURATION_MIN,
     POLL_FAILURE_TOLERANCE,
     SCHEDULE_ENABLED_DEFAULT,
@@ -146,6 +152,9 @@ class ScentTechClient:
         self.spray_duration = SPRAY_DURATION_DEFAULT
         self.pause_time = PAUSE_TIME_DEFAULT
         self.schedule_enabled = SCHEDULE_ENABLED_DEFAULT
+        self.custom_spray_duration = CUSTOM_SPRAY_DEFAULT
+        self.custom_pause_time = CUSTOM_PAUSE_DEFAULT
+        self.dispense_duration = DISPENSE_DURATION_DEFAULT
         self.led_rgb: tuple[int, int, int] | None = None
         self.powered: bool | None = None
         self.spraying: bool | None = None
@@ -410,6 +419,7 @@ class ScentTechClient:
         pause_time: int | None = None,
         intensity: int | None = None,
         stop_time: int | None = None,
+        remember_custom: bool = False,
     ) -> bool:
         """Write the complete settings packet, preserving the other setting.
 
@@ -432,6 +442,20 @@ class ScentTechClient:
                 f"Pause time must be between {PAUSE_TIME_MIN} and "
                 f"{PAUSE_TIME_MAX} seconds"
             )
+
+        if remember_custom:
+            self.custom_spray_duration = new_duration
+            self.custom_pause_time = new_pause
+
+        # Rewriting the timer record makes the firmware restart its cycle at the
+        # spray phase, so a redundant write costs a burst of fragrance for no
+        # change. Skip it when nothing would actually differ.
+        if (
+            new_duration == self.spray_duration
+            and new_pause == self.pause_time
+        ):
+            self._notify_listeners()
+            return True
 
         payload = self.build_settings_packet(
             new_duration, new_pause, self.schedule_enabled
@@ -483,17 +507,53 @@ class ScentTechClient:
         schedule from ever running again.
         """
         async with self._dispense_lock:
-            await self.async_send(COMMAND_DISPENSE, allow_duplicate=True)
+            if self.dispense_duration == MANUAL_DISPENSE_SECONDS:
+                # The dedicated one-shot leaves the power register untouched.
+                await self.async_send(COMMAND_DISPENSE, allow_duplicate=True)
+                return
+
+            # Any other length needs the power register held on, which the
+            # schedule also depends on, so its previous state is restored.
+            was_powered = self.powered
+            await self.async_send(COMMAND_ON, allow_duplicate=True)
+            try:
+                await asyncio.sleep(self.dispense_duration)
+            finally:
+                await asyncio.shield(
+                    self.async_send(COMMAND_OFF, allow_duplicate=True)
+                )
+                if was_powered or self.schedule_enabled:
+                    await asyncio.sleep(0.25)
+                    await asyncio.shield(
+                        self.async_send(COMMAND_ON, allow_duplicate=True)
+                    )
 
     async def async_set_preset(self, preset: str) -> bool:
-        """Apply one of the predefined fragrance presets in one BLE write."""
-        try:
-            duration, pause = PRESET_VALUES[preset]
-        except KeyError as err:
-            raise HomeAssistantError(f"Unsupported preset: {preset}") from err
+        """Apply a fragrance preset in one BLE write.
+
+        Custom is a real preset: it restores whatever spray and pause the user
+        last set by hand, rather than being an unselectable label.
+        """
+        if preset == PRESET_CUSTOM:
+            duration, pause = self.custom_spray_duration, self.custom_pause_time
+        else:
+            try:
+                duration, pause = PRESET_VALUES[preset]
+            except KeyError as err:
+                raise HomeAssistantError(f"Unsupported preset: {preset}") from err
         return await self.async_set_settings(
             spray_duration=duration, pause_time=pause
         )
+
+    async def async_set_dispense_duration(self, seconds: int) -> None:
+        """Set how long the Dispense now button sprays for."""
+        if not DISPENSE_DURATION_MIN <= seconds <= DISPENSE_DURATION_MAX:
+            raise HomeAssistantError(
+                f"Dispense duration must be between {DISPENSE_DURATION_MIN} "
+                f"and {DISPENSE_DURATION_MAX} seconds"
+            )
+        self.dispense_duration = seconds
+        self._notify_listeners()
 
     @property
     def available(self) -> bool:
