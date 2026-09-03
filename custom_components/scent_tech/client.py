@@ -148,8 +148,10 @@ class ScentTechClient:
         self.spray_duration = SPRAY_DURATION_DEFAULT
         self.pause_time = PAUSE_TIME_DEFAULT
         self.schedule_enabled = SCHEDULE_ENABLED_DEFAULT
-        self.custom_spray_duration = CUSTOM_SPRAY_DEFAULT
-        self.custom_pause_time = CUSTOM_PAUSE_DEFAULT
+        self.custom_spray_duration = custom_spray_duration
+        self.custom_pause_time = custom_pause_time
+        self.on_custom_changed: Callable[[int, int], None] | None = None
+        self.reload_signature: tuple[object, ...] | None = None
         self.led_rgb: tuple[int, int, int] | None = None
         self.powered: bool | None = None
         self.spraying: bool | None = None
@@ -297,7 +299,15 @@ class ScentTechClient:
             records[record.serial] = record
         self.records = records
 
+        # Values on the device that match no built-in preset are, by definition,
+        # the user's custom pair. Adopting them here means the Custom preset
+        # survives a restart even if the options were never written.
         owned = records.get(HA_SCHEDULE_SLOT)
+        if owned is not None:
+            pair = (owned.spray_duration, owned.pause_time)
+            if pair not in PRESET_VALUES.values():
+                self._remember_custom(*pair)
+
         self.ha_owns_schedule = owned is not None and owned.is_all_day
         if owned is not None and self.ha_owns_schedule:
             self.spray_duration = owned.spray_duration
@@ -439,8 +449,7 @@ class ScentTechClient:
             )
 
         if remember_custom:
-            self.custom_spray_duration = new_duration
-            self.custom_pause_time = new_pause
+            self._remember_custom(new_duration, new_pause)
 
         # Rewriting the timer record makes the firmware restart its cycle at the
         # spray phase, so a redundant write costs a burst of fragrance for no
@@ -504,6 +513,18 @@ class ScentTechClient:
                 # Always request stop after a successful start, including if Home
                 # Assistant cancels the button action during the delay.
                 await asyncio.shield(self.async_send(COMMAND_OFF))
+
+    def _remember_custom(self, spray_duration: int, pause_time: int) -> None:
+        """Record the Custom preset and persist it beyond this session."""
+        if (spray_duration, pause_time) == (
+            self.custom_spray_duration,
+            self.custom_pause_time,
+        ):
+            return
+        self.custom_spray_duration = spray_duration
+        self.custom_pause_time = pause_time
+        if self.on_custom_changed is not None:
+            self.on_custom_changed(spray_duration, pause_time)
 
     async def async_set_preset(self, preset: str) -> bool:
         """Apply a fragrance preset in one BLE write.
