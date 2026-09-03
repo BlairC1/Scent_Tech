@@ -19,10 +19,16 @@ from homeassistant.exceptions import HomeAssistantError
 
 from .const import (
     CHARACTERISTIC_UUID,
+    COMMAND_LED_CYCLE,
     COMMAND_OFF,
     COMMAND_ON,
     COMMAND_DEDUPLICATION_SECONDS,
     COMMAND_WAKE,
+    LED_CYCLE_ORDER,
+    LED_DEFAULT_COLOUR,
+    LED_OFF_RGB,
+    LED_PALETTE,
+    LED_STEP_TIMEOUT,
     MANUAL_DISPENSE_SECONDS,
     PAUSE_TIME_DEFAULT,
     PAUSE_TIME_MAX,
@@ -33,7 +39,15 @@ from .const import (
     SPRAY_DURATION_MAX,
     SPRAY_DURATION_MIN,
     SCHEDULE_ENABLED_DEFAULT,
+    STATUS_BGR_OFFSET,
+    STATUS_COMMAND,
+    STATUS_FLAG_POWERED,
+    STATUS_FLAG_SPRAYING,
+    STATUS_FLAGS_OFFSET,
+    STATUS_MIN_PAYLOAD,
+    STATUS_UPTIME_OFFSET,
 )
+
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -51,6 +65,7 @@ class ScentTechDiagnostics:
     connection_failures: int = 0
     last_command: str | None = None
     last_notification: str | None = None
+    last_status: str | None = None
     last_error: str | None = None
 
 
@@ -80,6 +95,14 @@ class ScentTechClient:
         self.spray_duration = SPRAY_DURATION_DEFAULT
         self.pause_time = PAUSE_TIME_DEFAULT
         self.schedule_enabled = SCHEDULE_ENABLED_DEFAULT
+        self.led_rgb: tuple[int, int, int] | None = None
+        self.powered: bool | None = None
+        self.spraying: bool | None = None
+        self.uptime: int | None = None
+        self.last_lit_colour = LED_DEFAULT_COLOUR
+        self._led_lock = asyncio.Lock()
+        self._status_event = asyncio.Event()
+        self._rx = bytearray()
         self._listeners: set[Callable[[], None]] = set()
 
     @property
@@ -91,6 +114,16 @@ class ScentTechClient:
     def stop_time(self) -> int:
         """Backward-compatible alias for pause time."""
         return self.pause_time
+
+    @property
+    def led_colour(self) -> str | None:
+        """Return the palette name for the last reported LED colour."""
+        if self.led_rgb is None:
+            return None
+        for name, value in LED_PALETTE.items():
+            if value == self.led_rgb:
+                return name
+        return None
 
     @property
     def preset(self) -> str:
@@ -125,10 +158,64 @@ class ScentTechClient:
             _LOGGER.debug("Scent Tech diffuser %s disconnected", self.address)
 
     def _notification(self, _sender: Any, data: bytearray) -> None:
-        """Record notifications for diagnostics and protocol analysis."""
+        """Reassemble notification bytes and decode any status frame."""
         value = bytes(data).hex()
         self.diagnostics.last_notification = value
         _LOGGER.debug("Notification from %s: %s", self.address, value)
+
+        self._rx.extend(data)
+        for frame in self._extract_frames():
+            if frame[3] == STATUS_COMMAND:
+                self._apply_status(frame)
+
+    def _extract_frames(self) -> list[bytes]:
+        """Pull every complete, checksum-valid frame out of the receive buffer."""
+        frames: list[bytes] = []
+        while True:
+            marker = self._rx.find(b"\x55\xaa")
+            if marker < 0:
+                # Keep a trailing 0x55 in case the header spans two notifications.
+                self._rx[:] = b"\x55" if self._rx.endswith(b"\x55") else b""
+                return frames
+            if marker:
+                del self._rx[:marker]
+            if len(self._rx) < 3:
+                return frames
+            size = self._rx[2] + 5
+            if len(self._rx) < size:
+                return frames
+            frame = bytes(self._rx[:size])
+            del self._rx[:size]
+            if frame[-1] != 0x5A or sum(frame[:-1]) & 0xFF:
+                _LOGGER.debug("Discarding invalid frame: %s", frame.hex())
+                continue
+            frames.append(frame)
+
+    def _apply_status(self, frame: bytes) -> None:
+        """Decode one 0x21 status push and publish the result."""
+        payload = frame[4:-2]
+        if len(payload) < STATUS_MIN_PAYLOAD:
+            _LOGGER.debug("Short status payload (%s bytes)", len(payload))
+            return
+
+        flags = payload[STATUS_FLAGS_OFFSET]
+        self.powered = bool(flags & STATUS_FLAG_POWERED)
+        self.spraying = bool(flags & STATUS_FLAG_SPRAYING)
+        # The colour triple arrives as blue, green, red.
+        self.led_rgb = (
+            payload[STATUS_BGR_OFFSET + 2],
+            payload[STATUS_BGR_OFFSET + 1],
+            payload[STATUS_BGR_OFFSET],
+        )
+        self.uptime = int.from_bytes(
+            payload[STATUS_UPTIME_OFFSET : STATUS_UPTIME_OFFSET + 4], "little"
+        )
+        if (colour := self.led_colour) is not None and colour != "off":
+            self.last_lit_colour = colour
+
+        self.diagnostics.last_status = frame.hex()
+        self._status_event.set()
+        self._notify_listeners()
 
     async def _async_connect(self) -> BleakClient:
         """Return the live persistent client, connecting once when needed."""
@@ -277,17 +364,64 @@ class ScentTechClient:
             spray_duration=duration, pause_time=pause
         )
 
-    async def async_send(self, payload: bytes) -> bool:
+    async def async_cycle_led(self) -> None:
+        """Advance the indicator LED one place through the firmware palette."""
+        async with self._led_lock:
+            await self._async_step_led()
+
+    async def _async_step_led(self) -> None:
+        """Send one cycle command and wait briefly for the status push."""
+        self._status_event.clear()
+        await self.async_send(COMMAND_LED_CYCLE, allow_duplicate=True)
+        try:
+            await asyncio.wait_for(self._status_event.wait(), LED_STEP_TIMEOUT)
+        except TimeoutError:
+            # The colour still changed; only the confirmation is missing.
+            _LOGGER.debug("No status push after an LED cycle on %s", self.address)
+
+    async def async_set_led_colour(self, colour: str) -> None:
+        """Cycle the LED until the diffuser reports the requested colour.
+
+        The firmware exposes no direct colour command, so this steps and checks.
+        Each write makes the diffuser beep, so an already-correct colour is left
+        alone rather than driven a full loop back to itself.
+        """
+        if colour not in LED_PALETTE:
+            raise HomeAssistantError(f"Unsupported LED colour: {colour}")
+
+        async with self._led_lock:
+            for _ in range(len(LED_CYCLE_ORDER)):
+                if self.led_colour == colour:
+                    return
+                await self._async_step_led()
+                if self.led_colour is None:
+                    raise HomeAssistantError(
+                        "The diffuser did not report its LED state; cannot "
+                        "select a colour without status feedback"
+                    )
+            if self.led_colour != colour:
+                _LOGGER.debug(
+                    "LED did not settle on %s after a full cycle (now %s)",
+                    colour,
+                    self.led_colour,
+                )
+
+    async def async_send(
+        self, payload: bytes, *, allow_duplicate: bool = False
+    ) -> bool:
         """Send one packet on the persistent session.
 
-        Return False when a rapid duplicate is deliberately suppressed.
+        Return False when a rapid duplicate is deliberately suppressed. Pass
+        allow_duplicate for commands whose repetition is meaningful, such as the
+        LED cycle, where each identical write advances the device one step.
         """
         self.diagnostics.commands_requested += 1
 
         async with self._lock:
             now = monotonic()
             if (
-                payload == self._last_payload
+                not allow_duplicate
+                and payload == self._last_payload
                 and now - self._last_write_at < COMMAND_DEDUPLICATION_SECONDS
             ):
                 self.diagnostics.commands_deduplicated += 1
