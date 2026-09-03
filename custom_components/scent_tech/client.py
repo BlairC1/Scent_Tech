@@ -45,6 +45,7 @@ from .const import (
     SPRAY_DURATION_MAX,
     CUSTOM_PAUSE_DEFAULT,
     CUSTOM_SPRAY_DEFAULT,
+    DISPENSE_CONFIRM_TIMEOUT,
     DISPENSE_DURATION_DEFAULT,
     DISPENSE_DURATION_MAX,
     DISPENSE_DURATION_MIN,
@@ -500,32 +501,43 @@ class ScentTechClient:
         await self.async_send(COMMAND_ON, allow_duplicate=True)
 
     async def async_dispense_now(self) -> None:
-        """Run one manual burst without disturbing power or the schedule.
+        """Run one manual burst, whatever the diffuser's power state.
 
-        Command 0x16 is a dedicated one-shot burst. The previous ON/sleep/OFF
-        approach left the power register off, which silently stopped the stored
-        schedule from ever running again.
+        Command 0x16 is a dedicated one-shot that leaves the power register
+        alone, but the firmware ignores it while the diffuser is powered off.
+        In that case, and for any non-default duration, the power register is
+        held on for the requested time and then returned to how it was.
         """
         async with self._dispense_lock:
-            if self.dispense_duration == MANUAL_DISPENSE_SECONDS:
-                # The dedicated one-shot leaves the power register untouched.
+            if (
+                self.powered is not False
+                and self.dispense_duration == MANUAL_DISPENSE_SECONDS
+            ):
+                self._status_event.clear()
                 await self.async_send(COMMAND_DISPENSE, allow_duplicate=True)
-                return
+                try:
+                    await asyncio.wait_for(
+                        self._status_event.wait(), DISPENSE_CONFIRM_TIMEOUT
+                    )
+                except TimeoutError:
+                    _LOGGER.debug(
+                        "No status push after a one-shot dispense on %s; "
+                        "falling back to a timed burst",
+                        self.address,
+                    )
+                else:
+                    return
 
-            # Any other length needs the power register held on, which the
-            # schedule also depends on, so its previous state is restored.
-            was_powered = self.powered
+            # Timed burst: hold the power register on, then put it back. The
+            # schedule depends on the same register, so it must be restored.
+            was_powered = bool(self.powered) or self.schedule_enabled
             await self.async_send(COMMAND_ON, allow_duplicate=True)
             try:
                 await asyncio.sleep(self.dispense_duration)
             finally:
-                await asyncio.shield(
-                    self.async_send(COMMAND_OFF, allow_duplicate=True)
-                )
-                if was_powered or self.schedule_enabled:
-                    await asyncio.sleep(0.25)
+                if not was_powered:
                     await asyncio.shield(
-                        self.async_send(COMMAND_ON, allow_duplicate=True)
+                        self.async_send(COMMAND_OFF, allow_duplicate=True)
                     )
 
     async def async_set_preset(self, preset: str) -> bool:
