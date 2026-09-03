@@ -29,10 +29,12 @@
         "title": "Bluetooth protocol options",
         "description": "The proven single-write mode is recommended. Enable the wake packet only if your diffuser does not react.",
         "data": {
-          "send_wake_packet": "Send wake packet before commands"
+          "send_wake_packet": "Send wake packet before commands",
+          "poll_interval": "Poll interval (seconds)"
         },
         "data_description": {
-          "send_wake_packet": "Adds the captured 55 AA 01 47 B9 5A packet before each ON/OFF packet. This may cause extra beeps."
+          "send_wake_packet": "Adds the captured 55 AA 01 47 B9 5A packet before each ON/OFF packet. This may cause extra beeps.",
+          "poll_interval": "How often to read the diffuser's stored settings so Home Assistant stays correct after a restart or a change made in the phone app."
         }
       }
     }
